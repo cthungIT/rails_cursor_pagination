@@ -6,51 +6,59 @@ module RailsCursorPagination
   # Cursor class that's used to uniquely identify a record and serialize and
   # deserialize this cursor so that it can be used for pagination.
   class Cursor
-    attr_reader :id, :order_field_value
+    attr_reader :id, :order_field_values
 
     class << self
-      # Generate a cursor for the given record and ordering field. The cursor
+      # Generate a cursor for the given record and ordering fields. The cursor
       # encodes all the data required to then paginate based on it with the
-      # given ordering field.
+      # given ordering fields.
       #
       # @param record [ActiveRecord]
       #   Model instance for which we want the cursor
-      # @param order_field [Symbol]
-      #   Column or virtual column of the record that the relation is ordered by
+      # @param order_fields [Symbol, Array<Symbol>]
+      #   Column(s) or virtual column(s) of the record that the relation is ordered by
       # @return [Cursor]
-      def from_record(record:, order_field: :id)
-        new(id: record.id, order_field: order_field,
-            order_field_value: record[order_field])
+      def from_record(record:, order_fields: :id)
+        order_fields = Array(order_fields)
+        order_field_values = order_fields.map { |field| record[field] }
+        
+        new(id: record.id, order_fields: order_fields,
+            order_field_values: order_field_values)
       end
 
       # Decode the provided encoded cursor. Returns an instance of this
       # +RailsCursorPagination::Cursor+ class containing either just the
-      # cursor's ID or in case of pagination on any other field, containing
-      # both the ID and the ordering field value.
+      # cursor's ID or in case of pagination on any other field(s), containing
+      # both the ID and the ordering field values.
       #
       # @param encoded_string [String]
       #   The encoded cursor
-      # @param order_field [Symbol]
-      #   Optional. The column that is being ordered on in case it's not the ID
+      # @param order_fields [Symbol, Array<Symbol>]
+      #   Optional. The column(s) that is being ordered on in case it's not the ID
       #   column
       # @return [RailsCursorPagination::Cursor]
-      def decode(encoded_string:, order_field: :id)
+      def decode(encoded_string:, order_fields: :id)
         decoded = JSON.parse(Base64.strict_decode64(encoded_string))
-        if order_field == :id
+        order_fields = Array(order_fields)
+        
+        if order_fields == [:id]
           if decoded.is_a?(Array)
             raise InvalidCursorError,
                   "The given cursor `#{encoded_string}` was decoded as " \
                   "`#{decoded}` but could not be parsed"
           end
-          new(id: decoded, order_field: :id)
+          new(id: decoded, order_fields: [:id])
         else
-          unless decoded.is_a?(Array) && decoded.size == 2
+          expected_size = order_fields.size + 1 # +1 for ID
+          unless decoded.is_a?(Array) && decoded.size == expected_size
             raise InvalidCursorError,
                   "The given cursor `#{encoded_string}` was decoded as " \
                   "`#{decoded}` but could not be parsed"
           end
-          new(id: decoded[1], order_field: order_field,
-              order_field_value: decoded[0])
+          order_field_values = decoded[0...-1] # All but last element
+          id = decoded.last
+          new(id: id, order_fields: order_fields,
+              order_field_values: order_field_values)
         end
       rescue ArgumentError, JSON::ParserError
         raise InvalidCursorError,
@@ -62,36 +70,36 @@ module RailsCursorPagination
     #
     # @param id [Integer]
     #   The ID of the cursor record
-    # @param order_field [Symbol]
-    #   The column or virtual column for ordering
-    # @param order_field_value [Object]
-    #   Optional. The value that the +order_field+ of the record contains in
-    #   case that the order field is not the ID
-    def initialize(id:, order_field: :id, order_field_value: nil)
+    # @param order_fields [Array<Symbol>]
+    #   The columns or virtual columns for ordering
+    # @param order_field_values [Array<Object>]
+    #   Optional. The values that the +order_fields+ of the record contains in
+    #   case that the order fields are not just the ID
+    def initialize(id:, order_fields: [:id], order_field_values: nil)
       @id = id
-      @order_field = order_field
-      @order_field_value = order_field_value
+      @order_fields = Array(order_fields)
+      @order_field_values = order_field_values
 
-      return if !custom_order_field? || !order_field_value.nil?
+      return if !custom_order_fields? || !order_field_values.nil?
 
-      raise ParameterError, 'The `order_field` was set to ' \
-                            "`#{@order_field.inspect}` but " \
-                            'no `order_field_value` was set'
+      raise ParameterError, 'The `order_fields` were set to ' \
+                            "`#{@order_fields.inspect}` but " \
+                            'no `order_field_values` were set'
     end
 
     # Generate an encoded string for this cursor. The cursor encodes all the
-    # data required to then paginate based on it with the given ordering field.
+    # data required to then paginate based on it with the given ordering fields.
     #
     # If we only order by ID, the cursor doesn't need to include any other data.
-    # But if we order by any other field, the cursor needs to include both the
-    # value from this other field as well as the records ID to resolve the order
-    # of duplicates in the non-ID field.
+    # But if we order by any other field(s), the cursor needs to include both the
+    # values from these other fields as well as the records ID to resolve the order
+    # of duplicates in the non-ID fields.
     #
     # @return [String]
     def encode
       unencoded_cursor =
-        if custom_order_field?
-          [@order_field_value, @id]
+        if custom_order_fields?
+          @order_field_values + [@id]
         else
           @id
         end
@@ -103,8 +111,8 @@ module RailsCursorPagination
     # Returns true when the order has been overridden from the default (ID)
     #
     # @return [Boolean]
-    def custom_order_field?
-      @order_field != :id
+    def custom_order_fields?
+      @order_fields != [:id]
     end
   end
 end
