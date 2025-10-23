@@ -64,7 +64,7 @@ module RailsCursorPagination
       @relation = relation
 
       @cursor = before || after
-      @is_forward_pagination = before.blank?
+      @is_forward_pagination = before.nil? || before.empty?
 
       @page_size =
         first ||
@@ -123,13 +123,13 @@ module RailsCursorPagination
         raise ParameterError,
               "`order` must be either :asc or :desc, but was `#{order}`"
       end
-      if first.present? && first.negative?
+      if first && first.negative?
         raise ParameterError, "`first` cannot be negative, but was `#{first}`"
       end
-      if last.present? && last.negative?
+      if last && last.negative?
         raise ParameterError, "`last` cannot be negative, but was `#{last}`"
       end
-      if limit.present? && limit.negative?
+      if limit && limit.negative?
         raise ParameterError, "`limit` cannot be negative, but was `#{limit}`"
       end
 
@@ -154,19 +154,19 @@ module RailsCursorPagination
     # @raise [RailsCursorPagination::ParameterError]
     #   If parameters are combined in an invalid way
     def ensure_valid_params_combinations!(first, last, limit, before, after)
-      if first.present? && last.present?
+      if first && last
         raise ParameterError, '`first` cannot be combined with `last`'
       end
-      if first.present? && limit.present?
+      if first && limit
         raise ParameterError, '`limit` cannot be combined with `first`'
       end
-      if last.present? && limit.present?
+      if last && limit
         raise ParameterError, '`limit` cannot be combined with `last`'
       end
-      if before.present? && after.present?
+      if before && after
         raise ParameterError, '`before` cannot be combined with `after`'
       end
-      if last.present? && before.blank?
+      if last && (before.nil? || before.empty?)
         raise ParameterError, '`last` must be combined with `before`'
       end
 
@@ -230,7 +230,7 @@ module RailsCursorPagination
         # When paginating forward, we can only have a previous page if we were
         # provided with a cursor and there were records discarded after applying
         # this filter. These records would have to be on previous pages.
-        @cursor.present? &&
+        @cursor &&
           filtered_and_sorted_relation.reorder('').size < total
       else
         # When paginating backwards, if we managed to load one more record than
@@ -424,7 +424,9 @@ module RailsCursorPagination
 
       if custom_order_fields?
         @order_fields.each do |field|
-          unless @relation.select_values.include?(field)
+          # Only select fields that are actual database columns, not complex expressions
+          unless @relation.select_values.include?(field) || 
+                 (field.is_a?(String) && is_complex_expression?(field))
             relation = relation.select(field)
           end
         end
@@ -502,7 +504,7 @@ module RailsCursorPagination
     # @return [ActiveRecord::Relation]
     def filtered_and_sorted_relation
       memoize :filtered_and_sorted_relation do
-        next sorted_relation if @cursor.blank?
+        next sorted_relation if @cursor.nil? || @cursor.empty?
 
         unless custom_order_fields?
           next sorted_relation.where "#{id_column} #{filter_operator} ?",
@@ -747,18 +749,39 @@ module RailsCursorPagination
           # Format: "field ASC" or "field DESC"
           field_part = part.gsub(/\s+(ASC|DESC)\s*$/i, '').strip
           direction_part = part.match(/\s+(ASC|DESC)\s*$/i)[1].upcase
-          field = is_complex_expression?(field_part) ? field_part : field_part.to_sym
+          # Keep table-prefixed fields as strings, convert simple fields to symbols
+          field = if is_complex_expression?(field_part)
+                    field_part
+                  elsif field_part.include?('.')
+                    field_part  # Keep table-prefixed fields as strings
+                  else
+                    field_part.to_sym
+                  end
           fields << field
           directions << direction_part.downcase.to_sym
         elsif part.include?(':')
           # Format: "field:direction"
           field, direction = part.split(':', 2).map(&:strip)
-          field = is_complex_expression?(field) ? field : field.to_sym
+          # Keep table-prefixed fields as strings, convert simple fields to symbols
+          field = if is_complex_expression?(field)
+                    field
+                  elsif field.include?('.')
+                    field  # Keep table-prefixed fields as strings
+                  else
+                    field.to_sym
+                  end
           fields << field
           directions << direction.to_sym
         else
           # Format: "field" (default to asc)
-          field = is_complex_expression?(part) ? part : part.to_sym
+          # Keep table-prefixed fields as strings, convert simple fields to symbols
+          field = if is_complex_expression?(part)
+                    part
+                  elsif part.include?('.')
+                    part  # Keep table-prefixed fields as strings
+                  else
+                    part.to_sym
+                  end
           fields << field
           directions << :asc
         end
