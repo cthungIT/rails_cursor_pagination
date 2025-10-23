@@ -184,5 +184,61 @@ module RailsCursorPagination
     def configure(&_block)
       yield(Configuration.instance)
     end
+
+    # Create a paginator with query string order support
+    #
+    # This is a convenience method that extracts order parameters from
+    # controller params and creates a paginator instance.
+    #
+    # @param relation [ActiveRecord::Relation]
+    #   Relation that will be paginated
+    # @param params [Hash]
+    #   Controller parameters hash
+    # @param options [Hash]
+    #   Additional options to pass to the paginator
+    # @return [RailsCursorPagination::Paginator]
+    #
+    # @example
+    #   # In a controller
+    #   def index
+    #     paginator = RailsCursorPagination.from_params(
+    #       Post.all,
+    #       params.permit(:first, :last, :after, :before, :order_query)
+    #     )
+    #     result = paginator.fetch
+    #     render json: result
+    #   end
+    #
+    # @example
+    #   # With additional options
+    #   paginator = RailsCursorPagination.from_params(
+    #     Post.all,
+    #     params,
+    #     { with_total: true }
+    #   )
+    def from_params(relation, params, options = {})
+      # Extract pagination parameters
+      pagination_params = {
+        first: params[:first]&.to_i,
+        last: params[:last]&.to_i,
+        after: params[:after],
+        before: params[:before],
+        limit: params[:limit]&.to_i
+      }.compact
+
+      # Extract order parameters
+      order_params = {}
+      if params[:order_query].present?
+        order_params[:order_query] = params[:order_query]
+      elsif params[:order_by].present? || params[:order].present?
+        order_params[:order_by] = params[:order_by]
+        order_params[:order] = params[:order]
+      end
+
+      # Merge with additional options
+      all_params = pagination_params.merge(order_params).merge(options)
+
+      Paginator.new(relation, **all_params)
+    end
   end
 end

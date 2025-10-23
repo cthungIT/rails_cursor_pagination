@@ -39,13 +39,23 @@ module RailsCursorPagination
     # @param order [Symbol, nil]
     #   Ordering to apply, either `:asc` or `:desc`. Defaults to `:asc`.
     #   This applies to all order_by fields.
+    # @param order_query [String, nil]
+    #   Query string containing order parameters (e.g., "name:asc,created_at:desc").
+    #   This will override order_by and order parameters if provided.
     #
     # @raise [RailsCursorPagination::ParameterError]
     #   If any parameter is not valid
     def initialize(relation, limit: nil, first: nil, after: nil, last: nil,
-                   before: nil, order_by: nil, order: nil)
-      @order_fields = Array(order_by || :id)
-      @order_direction = order || :asc
+                   before: nil, order_by: nil, order: nil, order_query: nil)
+      # Parse order query string if provided
+      if order_query.present?
+        parsed_order = parse_order_query(order_query)
+        @order_fields = parsed_order[:fields]
+        @order_direction = parsed_order[:direction]
+      else
+        @order_fields = Array(order_by || :id)
+        @order_direction = order || :asc
+      end
 
       ensure_valid_params_values!(relation, @order_direction, limit, first, last)
       ensure_valid_params_combinations!(first, last, limit, before, after)
@@ -680,6 +690,56 @@ module RailsCursorPagination
         order_hash[:id] = pagination_sorting.upcase
         order_hash
       end
+    end
+
+    # Parse order query string into fields and direction
+    #
+    # Supports formats like:
+    # - "name:asc" -> { fields: [:name], direction: :asc }
+    # - "name:asc,created_at:desc" -> { fields: [:name, :created_at], direction: :asc }
+    # - "name" -> { fields: [:name], direction: :asc }
+    # - "name,created_at" -> { fields: [:name, :created_at], direction: :asc }
+    #
+    # @param order_query [String]
+    #   Query string containing order parameters
+    # @return [Hash] with :fields and :direction keys
+    # @raise [RailsCursorPagination::ParameterError]
+    #   If the order query string is invalid
+    def parse_order_query(order_query)
+      return { fields: [:id], direction: :asc } if order_query.blank?
+
+      fields = []
+      directions = []
+      
+      # Split by comma to handle multiple fields
+      order_parts = order_query.split(',').map(&:strip)
+      
+      order_parts.each do |part|
+        if part.include?(':')
+          # Format: "field:direction"
+          field, direction = part.split(':', 2).map(&:strip)
+          fields << field.to_sym
+          directions << direction.to_sym
+        else
+          # Format: "field" (default to asc)
+          fields << part.to_sym
+          directions << :asc
+        end
+      end
+      
+      # Validate directions
+      directions.each do |direction|
+        unless %i[asc desc].include?(direction)
+          raise ParameterError, "Invalid order direction '#{direction}'. Must be 'asc' or 'desc'"
+        end
+      end
+      
+      # For multi-field sorting, we need to handle direction per field
+      # For now, we'll use the first direction for all fields
+      # In the future, this could be enhanced to support per-field directions
+      primary_direction = directions.first
+      
+      { fields: fields, direction: primary_direction }
     end
 
     # Ensures that given block is only executed exactly once and on subsequent
