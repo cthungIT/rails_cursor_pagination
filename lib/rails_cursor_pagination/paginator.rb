@@ -718,11 +718,15 @@ module RailsCursorPagination
         if part.include?(':')
           # Format: "field:direction"
           field, direction = part.split(':', 2).map(&:strip)
-          fields << field.to_sym
+          # Keep complex expressions as strings, convert simple fields to symbols
+          field = is_complex_expression?(field) ? field : field.to_sym
+          fields << field
           directions << direction.to_sym
         else
           # Format: "field" (default to asc)
-          fields << part.to_sym
+          # Keep complex expressions as strings, convert simple fields to symbols
+          field = is_complex_expression?(part) ? part : part.to_sym
+          fields << field
           directions << :asc
         end
       end
