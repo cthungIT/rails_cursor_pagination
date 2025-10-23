@@ -411,7 +411,7 @@ module RailsCursorPagination
     #
     # @return [ActiveRecord::Relation]
     def relation_with_cursor_fields
-      return @relation if @relation.select_values.blank? ||
+      return @relation if @relation.select_values.nil? || @relation.select_values.empty? ||
                           @relation.select_values.include?('*')
 
       relation = @relation
@@ -448,9 +448,9 @@ module RailsCursorPagination
       # Build the order hash for multiple fields
       order_hash = {}
       @order_fields.each do |field|
-        order_hash[field] = pagination_sorting.upcase
+        order_hash[field] = pagination_sorting
       end
-      order_hash[:id] = pagination_sorting.upcase
+      order_hash[:id] = pagination_sorting
 
       relation_with_cursor_fields.reorder(order_hash)
     end
