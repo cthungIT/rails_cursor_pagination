@@ -20,7 +20,14 @@ module RailsCursorPagination
       # @return [Cursor]
       def from_record(record:, order_fields: :id)
         order_fields = Array(order_fields)
-        order_field_values = order_fields.map { |field| record[field] }
+        order_field_values = order_fields.map do |field|
+          if field.is_a?(String) && is_complex_expression?(field)
+            # For complex expressions, we need to evaluate them in the database context
+            evaluate_complex_expression(record, field)
+          else
+            record[field]
+          end
+        end
         
         new(id: record.id, order_fields: order_fields,
             order_field_values: order_field_values)
@@ -113,6 +120,42 @@ module RailsCursorPagination
     # @return [Boolean]
     def custom_order_fields?
       @order_fields != [:id]
+    end
+
+    # Check if a field is a complex SQL expression
+    #
+    # @param field [String, Symbol]
+    # @return [Boolean]
+    def self.is_complex_expression?(field)
+      field.is_a?(String) && (
+        field.include?('CASE') ||
+        field.include?('WHEN') ||
+        field.include?('THEN') ||
+        field.include?('ELSE') ||
+        field.include?('END') ||
+        field.match?(/\(.*\)/) # Contains parentheses (function calls)
+      )
+    end
+
+    # Evaluate a complex expression for a given record
+    #
+    # @param record [ActiveRecord]
+    # @param expression [String]
+    # @return [Object]
+    def self.evaluate_complex_expression(record, expression)
+      # For complex expressions, we need to execute a query to get the value
+      # This is a simplified approach - in practice, you might need more sophisticated
+      # handling depending on the complexity of your expressions
+      
+      # Get the record's class and connection
+      model_class = record.class
+      connection = model_class.connection
+      
+      # Build a query to evaluate the expression for this specific record
+      sql = "SELECT (#{expression}) as expr_value FROM #{model_class.table_name} WHERE id = ?"
+      
+      result = connection.select_one(sql, record.id)
+      result['expr_value']
     end
   end
 end

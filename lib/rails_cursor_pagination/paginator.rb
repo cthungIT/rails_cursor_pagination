@@ -430,6 +430,11 @@ module RailsCursorPagination
         return relation_with_cursor_fields.reorder id: pagination_sorting.upcase
       end
 
+      # Check if we have complex SQL expressions (like CASE WHEN)
+      if has_complex_order_expressions?
+        return handle_complex_order_relation
+      end
+
       # Build the order hash for multiple fields
       order_hash = {}
       @order_fields.each do |field|
@@ -481,8 +486,13 @@ module RailsCursorPagination
                                      decoded_cursor.id
         end
 
-        # Build complex WHERE clause for multiple fields
-        build_multi_field_where_clause
+        # Handle complex expressions differently
+        if has_complex_order_expressions?
+          build_complex_expression_where_clause
+        else
+          # Build complex WHERE clause for multiple fields
+          build_multi_field_where_clause
+        end
       end
     end
 
@@ -534,6 +544,142 @@ module RailsCursorPagination
       end
       
       sorted_relation.where(conditions.join(' OR '), *values)
+    end
+
+    # Builds a WHERE clause for complex expressions like CASE WHEN
+    #
+    # @return [ActiveRecord::Relation]
+    def build_complex_expression_where_clause
+      # For complex expressions, we need to use the expression values directly
+      # in the WHERE clause rather than trying to parse field names
+      
+      if @order_fields.size == 1
+        # Single complex expression
+        expression = @order_fields.first
+        cursor_value = decoded_cursor.order_field_values.first
+        
+        # Build WHERE clause using the complex expression
+        where_clause = "(#{expression}) #{filter_operator} ?"
+        sorted_relation.where(where_clause, cursor_value)
+      else
+        # Multiple fields with at least one complex expression
+        # This is more complex and might need custom handling
+        # For now, fall back to a simplified approach
+        build_simplified_complex_where_clause
+      end
+    end
+
+    # Simplified approach for complex expressions with multiple fields
+    #
+    # @return [ActiveRecord::Relation]
+    def build_simplified_complex_where_clause
+      # For multiple complex expressions, we use a simplified approach
+      # that compares the complex expression values and falls back to ID comparison
+      
+      conditions = []
+      values = []
+      
+      # Add conditions for each complex expression
+      @order_fields.each_with_index do |field, index|
+        if field.is_a?(String) && is_complex_expression?(field)
+          conditions << "(#{field}) #{filter_operator} ?"
+          values << decoded_cursor.order_field_values[index]
+        else
+          conditions << "#{field} #{filter_operator} ?"
+          values << decoded_cursor.order_field_values[index]
+        end
+      end
+      
+      # Add ID comparison as tie-breaker
+      conditions << "#{id_column} #{filter_operator} ?"
+      values << decoded_cursor.id
+      
+      # For complex expressions, we need to use OR logic for the comparison
+      # This is a simplified approach - in practice, you might need more sophisticated logic
+      where_clause = conditions.join(' OR ')
+      sorted_relation.where(where_clause, *values)
+    end
+
+    # Check if a field is a complex SQL expression (helper method)
+    #
+    # @param field [String, Symbol]
+    # @return [Boolean]
+    def is_complex_expression?(field)
+      field.is_a?(String) && (
+        field.include?('CASE') ||
+        field.include?('WHEN') ||
+        field.include?('THEN') ||
+        field.include?('ELSE') ||
+        field.include?('END') ||
+        field.match?(/\(.*\)/) # Contains parentheses (function calls)
+      )
+    end
+
+    # Check if any of the order fields contains complex SQL expressions
+    # like CASE WHEN, function calls, etc.
+    #
+    # @return [Boolean]
+    def has_complex_order_expressions?
+      @order_fields.any? do |field|
+        field.is_a?(String) && (
+          field.include?('CASE') ||
+          field.include?('WHEN') ||
+          field.include?('THEN') ||
+          field.include?('ELSE') ||
+          field.include?('END') ||
+          field.match?(/\(.*\)/) # Contains parentheses (function calls)
+        )
+      end
+    end
+
+    # Handle relations with complex order expressions by preserving the original
+    # ordering and applying pagination direction logic
+    #
+    # @return [ActiveRecord::Relation]
+    def handle_complex_order_relation
+      # For complex expressions, we need to preserve the original ordering
+      # and handle direction changes differently
+      if pagination_sorting != @order_direction
+        # We need to reverse the complex expression for backward pagination
+        reversed_order = reverse_complex_order_expression
+        relation_with_cursor_fields.reorder(reversed_order)
+      else
+        # Keep the original ordering for forward pagination
+        relation_with_cursor_fields
+      end
+    end
+
+    # Reverse a complex order expression for backward pagination
+    #
+    # @return [String, Hash]
+    def reverse_complex_order_expression
+      # For complex expressions, we need to reverse the entire ORDER BY clause
+      # This is a simplified approach - in practice, you might need more sophisticated
+      # parsing depending on the complexity of your expressions
+      if @order_fields.size == 1 && @order_fields.first.is_a?(String)
+        # Single complex expression - reverse it by adding DESC/ASC
+        field = @order_fields.first
+        if field.match?(/\b(ASC|DESC)\b/i)
+          # Replace existing direction
+          field.gsub(/\b(ASC|DESC)\b/i, pagination_sorting.upcase)
+        else
+          # Add direction
+          "#{field} #{pagination_sorting.upcase}"
+        end
+      else
+        # Multiple fields - this is more complex and might need custom handling
+        # For now, fall back to simple field reversal
+        order_hash = {}
+        @order_fields.each do |field|
+          if field.is_a?(String) && field.match?(/\b(ASC|DESC)\b/i)
+            order_hash[field] = pagination_sorting.upcase
+          else
+            order_hash[field] = pagination_sorting.upcase
+          end
+        end
+        order_hash[:id] = pagination_sorting.upcase
+        order_hash
+      end
     end
 
     # Ensures that given block is only executed exactly once and on subsequent
