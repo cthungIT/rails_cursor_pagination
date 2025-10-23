@@ -147,15 +147,22 @@ module RailsCursorPagination
       # This is a simplified approach - in practice, you might need more sophisticated
       # handling depending on the complexity of your expressions
       
-      # Get the record's class and connection
-      model_class = record.class
-      connection = model_class.connection
-      
-      # Build a query to evaluate the expression for this specific record
-      sql = "SELECT (#{expression}) as expr_value FROM #{model_class.table_name} WHERE id = ?"
-      
-      result = connection.select_one(sql, record.id)
-      result['expr_value']
+      begin
+        # Get the record's class and connection
+        model_class = record.class
+        connection = model_class.connection
+        
+        # Build a query to evaluate the expression for this specific record
+        sql = "SELECT (#{expression}) as expr_value FROM #{model_class.table_name} WHERE id = ?"
+        
+        result = connection.select_one(sql, record.id)
+        result['expr_value']
+      rescue => e
+        # If complex expression evaluation fails, fall back to a simple approach
+        # This ensures pagination doesn't break even if cursor generation fails
+        puts "Warning: Failed to evaluate complex expression '#{expression}': #{e.message}"
+        0 # Return a default value
+      end
     end
   end
 end

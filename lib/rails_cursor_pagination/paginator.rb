@@ -52,9 +52,11 @@ module RailsCursorPagination
         parsed_order = parse_order_query(order_query)
         @order_fields = parsed_order[:fields]
         @order_direction = parsed_order[:direction]
+        @field_directions = parsed_order[:field_directions]
       else
         @order_fields = Array(order_by || :id)
         @order_direction = order || :asc
+        @field_directions = [@order_direction]
       end
 
       ensure_valid_params_values!(relation, @order_direction, limit, first, last)
@@ -437,7 +439,7 @@ module RailsCursorPagination
     # @return [ActiveRecord::Relation]
     def sorted_relation
       unless custom_order_fields?
-        return relation_with_cursor_fields.reorder id: pagination_sorting.upcase
+        return relation_with_cursor_fields.reorder id: pagination_sorting
       end
 
       # Check if we have complex SQL expressions (like CASE WHEN)
@@ -445,14 +447,25 @@ module RailsCursorPagination
         return handle_complex_order_relation
       end
 
-      # Build the order hash for multiple fields
-      order_hash = {}
-      @order_fields.each do |field|
-        order_hash[field] = pagination_sorting
+      # Build the order hash for multiple fields with per-field directions
+      if @field_directions && @field_directions.size > 1
+        # Use per-field directions for multiple fields
+        order_clauses = []
+        @order_fields.each_with_index do |field, index|
+          direction = @field_directions[index]
+          order_clauses << "#{field} #{direction.to_s.upcase}"
+        end
+        order_clauses << "#{id_column} #{@order_direction.to_s.upcase}"
+        relation_with_cursor_fields.reorder(order_clauses.join(', '))
+      else
+        # Use single direction for all fields (backward compatibility)
+        order_hash = {}
+        @order_fields.each do |field|
+          order_hash[field] = pagination_sorting
+        end
+        order_hash[:id] = pagination_sorting
+        relation_with_cursor_fields.reorder(order_hash)
       end
-      order_hash[:id] = pagination_sorting
-
-      relation_with_cursor_fields.reorder(order_hash)
     end
 
     # Return a properly escaped reference to the ID column prefixed with the
@@ -651,21 +664,23 @@ module RailsCursorPagination
       if @order_fields.size == 1
         # Single complex expression
         expression = @order_fields.first
-        direction = pagination_sorting.upcase
+        direction = @field_directions.first.to_s.upcase
         
         # Apply the complex expression with proper direction
         relation_with_cursor_fields.reorder("#{expression} #{direction}, #{id_column} #{direction}")
       else
-        # Multiple fields with complex expressions
+        # Multiple fields with complex expressions - use per-field directions
         order_clauses = []
-        @order_fields.each do |field|
+        @order_fields.each_with_index do |field, index|
+          direction = @field_directions[index].to_s.upcase
           if field.is_a?(String) && is_complex_expression?(field)
-            order_clauses << "#{field} #{pagination_sorting.upcase}"
+            order_clauses << "#{field} #{direction}"
           else
-            order_clauses << "#{field} #{pagination_sorting.upcase}"
+            order_clauses << "#{field} #{direction}"
           end
         end
-        order_clauses << "#{id_column} #{pagination_sorting.upcase}"
+        # Add ID column with the primary direction
+        order_clauses << "#{id_column} #{@order_direction.to_s.upcase}"
         
         relation_with_cursor_fields.reorder(order_clauses.join(', '))
       end
@@ -727,16 +742,22 @@ module RailsCursorPagination
       order_parts = order_query.split(',').map(&:strip)
       
       order_parts.each do |part|
-        if part.include?(':')
+        # Check for SQL-style direction (ASC/DESC at the end)
+        if part.match?(/\s+(ASC|DESC)\s*$/i)
+          # Format: "field ASC" or "field DESC"
+          field_part = part.gsub(/\s+(ASC|DESC)\s*$/i, '').strip
+          direction_part = part.match(/\s+(ASC|DESC)\s*$/i)[1].upcase
+          field = is_complex_expression?(field_part) ? field_part : field_part.to_sym
+          fields << field
+          directions << direction_part.downcase.to_sym
+        elsif part.include?(':')
           # Format: "field:direction"
           field, direction = part.split(':', 2).map(&:strip)
-          # Keep complex expressions as strings, convert simple fields to symbols
           field = is_complex_expression?(field) ? field : field.to_sym
           fields << field
           directions << direction.to_sym
         else
           # Format: "field" (default to asc)
-          # Keep complex expressions as strings, convert simple fields to symbols
           field = is_complex_expression?(part) ? part : part.to_sym
           fields << field
           directions << :asc
@@ -751,11 +772,10 @@ module RailsCursorPagination
       end
       
       # For multi-field sorting, we need to handle direction per field
-      # For now, we'll use the first direction for all fields
-      # In the future, this could be enhanced to support per-field directions
+      # Store both fields and their individual directions
       primary_direction = directions.first
       
-      { fields: fields, direction: primary_direction }
+      { fields: fields, direction: primary_direction, field_directions: directions }
     end
 
     # Ensures that given block is only executed exactly once and on subsequent
