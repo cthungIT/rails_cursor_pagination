@@ -48,7 +48,7 @@ module RailsCursorPagination
     def initialize(relation, limit: nil, first: nil, after: nil, last: nil,
                    before: nil, order_by: nil, order: nil, order_query: nil)
       # Parse order query string if provided
-      if order_query.present?
+      if order_query && !order_query.to_s.strip.empty?
         parsed_order = parse_order_query(order_query)
         @order_fields = parsed_order[:fields]
         @order_direction = parsed_order[:direction]
@@ -647,15 +647,27 @@ module RailsCursorPagination
     #
     # @return [ActiveRecord::Relation]
     def handle_complex_order_relation
-      # For complex expressions, we need to preserve the original ordering
-      # and handle direction changes differently
-      if pagination_sorting != @order_direction
-        # We need to reverse the complex expression for backward pagination
-        reversed_order = reverse_complex_order_expression
-        relation_with_cursor_fields.reorder(reversed_order)
+      # For complex expressions, we need to apply the ordering properly
+      if @order_fields.size == 1
+        # Single complex expression
+        expression = @order_fields.first
+        direction = pagination_sorting.upcase
+        
+        # Apply the complex expression with proper direction
+        relation_with_cursor_fields.reorder("#{expression} #{direction}, #{id_column} #{direction}")
       else
-        # Keep the original ordering for forward pagination
-        relation_with_cursor_fields
+        # Multiple fields with complex expressions
+        order_clauses = []
+        @order_fields.each do |field|
+          if field.is_a?(String) && is_complex_expression?(field)
+            order_clauses << "#{field} #{pagination_sorting.upcase}"
+          else
+            order_clauses << "#{field} #{pagination_sorting.upcase}"
+          end
+        end
+        order_clauses << "#{id_column} #{pagination_sorting.upcase}"
+        
+        relation_with_cursor_fields.reorder(order_clauses.join(', '))
       end
     end
 
@@ -706,7 +718,7 @@ module RailsCursorPagination
     # @raise [RailsCursorPagination::ParameterError]
     #   If the order query string is invalid
     def parse_order_query(order_query)
-      return { fields: [:id], direction: :asc } if order_query.blank?
+      return { fields: [:id], direction: :asc } if order_query.nil? || order_query.to_s.strip.empty?
 
       fields = []
       directions = []
