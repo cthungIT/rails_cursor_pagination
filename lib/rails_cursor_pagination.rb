@@ -3,6 +3,7 @@
 # This library allows to paginate through a passed relation using a cursor
 # and first/after or last/before parameters. It also supports ordering by
 # any column on the relation in either ascending or descending order.
+# Additionally, it supports offset-based pagination when no ordering is needed.
 #
 # Cursor pagination allows to paginate results and gracefully deal with
 # deletions / additions on previous pages. Where a regular limit / offset

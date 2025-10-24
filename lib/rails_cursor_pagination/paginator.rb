@@ -29,6 +29,7 @@ module RailsCursorPagination
     #   Cursor to paginate upto (excluding). Can be combined with `last`.
     # @param order_by [Symbol, String, nil]
     #   Column to order by. If none is provided, will default to ID column.
+    #   If set to `:none`, pagination will use offset-based approach instead of cursor-based.
     #   NOTE: this will cause the query to filter on both the given column as
     #   well as the ID column. So you might want to add a compound index to your
     #   database similar to:
@@ -37,6 +38,7 @@ module RailsCursorPagination
     #   ```
     # @param order [Symbol, nil]
     #   Ordering to apply, either `:asc` or `:desc`. Defaults to `:asc`.
+    #   Ignored when order_by is set to `:none`.
     #
     # @raise [RailsCursorPagination::ParameterError]
     #   If any parameter is not valid
@@ -51,6 +53,7 @@ module RailsCursorPagination
       @order_field = order_by
       @order_direction = order
       @relation = relation
+      @use_offset_pagination = (order_by == :none)
 
       @cursor = before || after
       @is_forward_pagination = before.blank?
@@ -211,11 +214,21 @@ module RailsCursorPagination
       @order_field.downcase.to_sym != :id
     end
 
+    # Check if we're using offset-based pagination instead of cursor-based pagination.
+    # This happens when order_by is set to :none.
+    #
+    # @return [TrueClass, FalseClass]
+    def use_offset_pagination?
+      @use_offset_pagination
+    end
+
     # Check if there is a page before the current one.
     #
     # @return [TrueClass, FalseClass]
     def previous_page?
-      if paginate_forward?
+      if use_offset_pagination?
+        offset_pagination_previous_page?
+      elsif paginate_forward?
         # When paginating forward, we can only have a previous page if we were
         # provided with a cursor and there were records discarded after applying
         # this filter. These records would have to be on previous pages.
@@ -232,7 +245,9 @@ module RailsCursorPagination
     #
     # @return [TrueClass, FalseClass]
     def next_page?
-      if paginate_forward?
+      if use_offset_pagination?
+        offset_pagination_next_page?
+      elsif paginate_forward?
         # When paginating forward, if we managed to load one more record than
         # requested, this record will be available on the next page.
         records_plus_one.size > @page_size
@@ -248,9 +263,12 @@ module RailsCursorPagination
     #
     # @return [Array<ActiveRecord>]
     def records
-      records = records_plus_one.first(@page_size)
-
-      paginate_forward? ? records : records.reverse
+      if use_offset_pagination?
+        offset_pagination_records
+      else
+        records = records_plus_one.first(@page_size)
+        paginate_forward? ? records : records.reverse
+      end
     end
 
     # Apply limit to filtered and sorted relation that contains one item more
@@ -362,20 +380,34 @@ module RailsCursorPagination
     # value from this other field as well as the records ID to resolve the order
     # of duplicates in the non-ID field.
     #
+    # For offset pagination, the cursor simply encodes the record's position.
+    #
     # @param record [ActiveRecord] Model instance for which we want the cursor
     # @return [String]
     def cursor_for_record(record)
-      cursor_class.from_record(record: record, order_field: @order_field).encode
+      if use_offset_pagination?
+        # For offset pagination, encode the record's position in the result set
+        position = records.index(record) || 0
+        Base64.strict_encode64(position.to_json)
+      else
+        cursor_class.from_record(record: record, order_field: @order_field).encode
+      end
     end
 
     # Decode the provided cursor. Either just returns the cursor's ID or in case
     # of pagination on any other field, returns a tuple of first the cursor
     # record's other field's value followed by its ID.
     #
+    # For offset pagination, returns the position.
+    #
     # @return [Integer, Array]
     def decoded_cursor
       memoize(:decoded_cursor) do
-        cursor_class.decode(encoded_string: @cursor, order_field: @order_field)
+        if use_offset_pagination?
+          JSON.parse(Base64.strict_decode64(@cursor))
+        else
+          cursor_class.decode(encoded_string: @cursor, order_field: @order_field)
+        end
       end
     end
 
@@ -493,6 +525,50 @@ module RailsCursorPagination
       return @memos[key] if @memos.key?(key)
 
       @memos[key] = yield
+    end
+
+    # Get records for offset-based pagination
+    #
+    # @return [Array<ActiveRecord>]
+    def offset_pagination_records
+      memoize :offset_pagination_records do
+        offset = @cursor.present? ? decoded_cursor : 0
+        
+        if paginate_forward?
+          # Forward pagination: get records after the offset
+          @relation.offset(offset).limit(@page_size).load
+        else
+          # Backward pagination: get records before the offset
+          # We need to calculate the start position for backward pagination
+          start_offset = [0, offset - @page_size].max
+          @relation.offset(start_offset).limit(@page_size).load.reverse
+        end
+      end
+    end
+
+    # Check if there is a previous page for offset pagination
+    #
+    # @return [TrueClass, FalseClass]
+    def offset_pagination_previous_page?
+      return false if @cursor.blank?
+      
+      offset = decoded_cursor
+      offset > 0
+    end
+
+    # Check if there is a next page for offset pagination
+    #
+    # @return [TrueClass, FalseClass]
+    def offset_pagination_next_page?
+      offset = @cursor.present? ? decoded_cursor : 0
+      
+      if paginate_forward?
+        # Forward pagination: check if there are more records after current offset + page_size
+        @relation.offset(offset + @page_size).limit(1).exists?
+      else
+        # Backward pagination: check if there are records before the current offset
+        offset > @page_size
+      end
     end
   end
 end
