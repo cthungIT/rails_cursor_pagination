@@ -27,18 +27,36 @@ module RailsCursorPagination
     #   Number of records to return. Must be used together with `before`.
     # @param before [String, nil]
     #   Cursor to paginate upto (excluding). Can be combined with `last`.
-    # @param order_by [Symbol, String, nil]
-    #   Column to order by. If none is provided, will default to ID column.
+    # @param order_by [Symbol, String, Array, nil]
+    #   Column(s) to order by. Can be:
+    #   - A single column: `:author` or `'author'`
+    #   - An array of columns: `[:author, :created_at]` (all use default order)
+    #   - An array of hashes with column and order: `[{column: :author, order: :asc}, {column: :created_at, order: :desc}]`
+    #   If none is provided, will default to ID column.
     #   If set to `:none`, pagination will use offset-based approach instead of cursor-based.
-    #   NOTE: this will cause the query to filter on both the given column as
+    #   NOTE: this will cause the query to filter on the given columns as
     #   well as the ID column. So you might want to add a compound index to your
     #   database similar to:
     #   ```sql
-    #     CREATE INDEX <index_name> ON <table_name> (<order_by_field>, id)
+    #     CREATE INDEX <index_name> ON <table_name> (<order_by_field1>, <order_by_field2>, id)
+    #   ```
+    #   Examples:
+    #   ```ruby
+    #   # Single field
+    #   Paginator.new(relation, order_by: :author)
+    #   
+    #   # Multiple fields with same order
+    #   Paginator.new(relation, order_by: [:author, :created_at])
+    #   
+    #   # Multiple fields with different orders
+    #   Paginator.new(relation, order_by: [
+    #     {column: :author, order: :asc}, 
+    #     {column: :created_at, order: :desc}
+    #   ])
     #   ```
     # @param order [Symbol, nil]
     #   Ordering to apply, either `:asc` or `:desc`. Defaults to `:asc`.
-    #   Ignored when order_by is set to `:none`.
+    #   Ignored when order_by is set to `:none` or when using array format with explicit orders.
     #
     # @raise [RailsCursorPagination::ParameterError]
     #   If any parameter is not valid
@@ -50,8 +68,8 @@ module RailsCursorPagination
       ensure_valid_params_values!(relation, order, limit, first, last)
       ensure_valid_params_combinations!(first, last, limit, before, after)
 
-      @order_field = order_by
-      @order_direction = order
+      # Parse order_by parameter to support multiple fields
+      @order_specs = parse_order_specs(order_by, order)
       @relation = relation
       @use_offset_pagination = (order_by == :none)
 
@@ -211,7 +229,10 @@ module RailsCursorPagination
     #
     # @return [TrueClass, FalseClass]
     def custom_order_field?
-      @order_field.downcase.to_sym != :id
+      return false if @order_specs.empty?
+      
+      # Check if any order spec is not just ID
+      @order_specs.any? { |spec| spec[:column].to_s.downcase.to_sym != :id }
     end
 
     # Check if we're using offset-based pagination instead of cursor-based pagination.
@@ -220,6 +241,35 @@ module RailsCursorPagination
     # @return [TrueClass, FalseClass]
     def use_offset_pagination?
       @use_offset_pagination
+    end
+
+    # Parse the order_by parameter to support multiple fields with different orders
+    #
+    # @param order_by [Symbol, String, Array, nil]
+    #   The order_by parameter from initialization
+    # @param default_order [Symbol]
+    #   The default order to use when not specified
+    # @return [Array<Hash>] Array of order specifications
+    def parse_order_specs(order_by, default_order)
+      case order_by
+      when :none
+        []
+      when Symbol, String
+        [{ column: order_by, order: default_order }]
+      when Array
+        order_by.map do |spec|
+          case spec
+          when Symbol, String
+            { column: spec, order: default_order }
+          when Hash
+            { column: spec[:column] || spec['column'], order: spec[:order] || spec['order'] || default_order }
+          else
+            raise ParameterError, "Invalid order specification: #{spec.inspect}"
+          end
+        end
+      else
+        raise ParameterError, "Invalid order_by parameter: #{order_by.inspect}"
+      end
     end
 
     # Check if there is a page before the current one.
@@ -308,55 +358,32 @@ module RailsCursorPagination
     # backward pagination, we then reverse the order of the loaded records again
     # in `#records` to return them in the right order to the user.
     #
-    # Examples:
-    #  - first 2 after 4 ascending
-    #    -> SELECT * FROM table WHERE id > 4 ODER BY id ASC LIMIT 2
-    #  - first 2 after 4 descending                      ^ as requested
-    #    -> SELECT * FROM table WHERE id < 4 ODER BY id DESC LIMIT 2
-    #  but:                                              ^ as requested
-    #  - last 2 before 4 ascending
-    #    -> SELECT * FROM table WHERE id < 4 ODER BY id DESC LIMIT 2
-    #  - last 2 before 4 descending                      ^ reversed
-    #    -> SELECT * FROM table WHERE id > 4 ODER BY id ASC LIMIT 2
-    #                                                    ^ reversed
-    #
-    # @return [Symbol] Either :asc or :desc
+    # @return [Array<Hash>] Order specifications with correct sorting direction
     def pagination_sorting
-      return @order_direction if paginate_forward?
+      return @order_specs if paginate_forward?
 
-      @order_direction == :asc ? :desc : :asc
+      # For backward pagination, reverse the order of each field
+      @order_specs.map do |spec|
+        {
+          column: spec[:column],
+          order: spec[:order] == :asc ? :desc : :asc
+        }
+      end
     end
 
     # Get the right operator to use in the SQL WHERE clause for filtering based
     # on the given cursor. This is dependent on the requested order and
     # pagination direction.
     #
-    # If we paginate forward and want ascending records, or if we paginate
-    # backward and want descending records we need records that have a higher
-    # value than our cursor.
-    #
-    # On the contrary, if we paginate forward but want descending records, or
-    # if we paginate backwards and want ascending records, we need them to have
-    # lower values than our cursor.
-    #
-    # Examples:
-    #  - first 2 after 4 ascending
-    #    -> SELECT * FROM table WHERE id > 4 ODER BY id ASC LIMIT 2
-    #  - last 2 before 4 descending      ^ records with higher value than cursor
-    #    -> SELECT * FROM table WHERE id > 4 ODER BY id ASC LIMIT 2
-    #  but:                              ^ records with higher value than cursor
-    #  - first 2 after 4 descending
-    #    -> SELECT * FROM table WHERE id < 4 ODER BY id DESC LIMIT 2
-    #  - last 2 before 4 ascending       ^ records with lower value than cursor
-    #    -> SELECT * FROM table WHERE id < 4 ODER BY id DESC LIMIT 2
-    #                                    ^ records with lower value than cursor
-    #
+    # @param order_spec [Hash] The order specification for a field
     # @return [String] either '<' or '>'
-    def filter_operator
+    def filter_operator_for_field(order_spec)
+      field_order = order_spec[:order]
+      
       if paginate_forward?
-        @order_direction == :asc ? '>' : '<'
+        field_order == :asc ? '>' : '<'
       else
-        @order_direction == :asc ? '<' : '>'
+        field_order == :asc ? '<' : '>'
       end
     end
 
@@ -399,7 +426,15 @@ module RailsCursorPagination
         end
         Base64.strict_encode64(absolute_position.to_json)
       else
-        cursor_class.from_record(record: record, order_field: @order_field).encode
+        if @order_specs.size == 1 && @order_specs.first[:column].to_s.downcase.to_sym == :id
+          # Single ID field - use simple cursor
+          cursor_class.from_record(record: record, order_field: :id).encode
+        else
+          # Multiple fields or custom field - encode all field values plus ID
+          field_values = @order_specs.map { |spec| record[spec[:column]] }
+          cursor_data = field_values + [record.id]
+          Base64.strict_encode64(cursor_data.to_json)
+        end
       end
     end
 
@@ -415,7 +450,13 @@ module RailsCursorPagination
         if use_offset_pagination?
           JSON.parse(Base64.strict_decode64(@cursor))
         else
-          cursor_class.decode(encoded_string: @cursor, order_field: @order_field)
+          if @order_specs.size == 1 && @order_specs.first[:column].to_s.downcase.to_sym == :id
+            # Single ID field - use simple cursor decoding
+            cursor_class.decode(encoded_string: @cursor, order_field: :id)
+          else
+            # Multiple fields or custom field - decode the array
+            JSON.parse(Base64.strict_decode64(@cursor))
+          end
         end
       end
     end
@@ -453,8 +494,14 @@ module RailsCursorPagination
         relation = relation.select(:id)
       end
 
-      if custom_order_field? && !@relation.select_values.include?(@order_field)
-        relation = relation.select(@order_field)
+      if custom_order_field?
+        # Add all order fields to the select
+        @order_specs.each do |spec|
+          field = spec[:column]
+          unless @relation.select_values.include?(field)
+            relation = relation.select(field)
+          end
+        end
       end
 
       relation
@@ -466,12 +513,18 @@ module RailsCursorPagination
     # @return [ActiveRecord::Relation]
     def sorted_relation
       unless custom_order_field?
-        return relation_with_cursor_fields.reorder id: pagination_sorting.upcase
+        return relation_with_cursor_fields.reorder id: pagination_sorting.first[:order].upcase
       end
 
-      relation_with_cursor_fields
-        .reorder(@order_field => pagination_sorting.upcase,
-                 id: pagination_sorting.upcase)
+      # Build the order hash for multiple fields
+      order_hash = {}
+      pagination_sorting.each do |spec|
+        order_hash[spec[:column]] = spec[:order].upcase
+      end
+      # Always add ID as the final sort field for consistency
+      order_hash[:id] = pagination_sorting.first[:order].upcase
+
+      relation_with_cursor_fields.reorder(order_hash)
     end
 
     # Return a properly escaped reference to the ID column prefixed with the
@@ -486,21 +539,14 @@ module RailsCursorPagination
       "#{escaped_table_name}.#{escaped_id_column}".freeze
     end
 
-    # Applies the filtering based on the provided cursor and order column to the
+    # Applies the filtering based on the provided cursor and order columns to the
     # sorted relation.
     #
-    # In case a custom `order_by` field is provided, we have to filter based on
-    # this field and the ID column to ensure reproducible results.
-    #
-    # To better understand this, let's consider our example with the `posts`
-    # table. Say that we're paginating forward and add `order_by: :author` to
-    # the call, and if the cursor that is passed encodes `['Jane', 4]`. In this
-    # case we will have to select all posts that either have an author whose
-    # name is alphanumerically greater than 'Jane', or if the author is 'Jane'
-    # we have to ensure that the post's ID is greater than `4`.
-    #
-    # So our SQL WHERE clause needs to be something like:
-    #    WHERE author > 'Jane' OR author = 'Jane' AND id > 4
+    # For multiple fields, we need to build a complex WHERE clause that handles
+    # lexicographic ordering. For example, with fields [author, created_at, id]:
+    #   WHERE author > 'Jane' 
+    #   OR (author = 'Jane' AND created_at > '2023-01-01')
+    #   OR (author = 'Jane' AND created_at = '2023-01-01' AND id > 4)
     #
     # @return [ActiveRecord::Relation]
     def filtered_and_sorted_relation
@@ -508,18 +554,79 @@ module RailsCursorPagination
         next sorted_relation if @cursor.blank?
 
         unless custom_order_field?
-          next sorted_relation.where "#{id_column} #{filter_operator} ?",
-                                     decoded_cursor.id
+          # Simple ID-only filtering
+          cursor_data = decoded_cursor
+          if cursor_data.is_a?(Integer)
+            next sorted_relation.where "#{id_column} #{filter_operator_for_field(@order_specs.first)} ?", cursor_data
+          end
         end
 
-        sorted_relation
-          .where("#{@order_field} #{filter_operator} ?",
-                 decoded_cursor.order_field_value)
-          .or(
-            sorted_relation
-              .where("#{@order_field} = ?", decoded_cursor.order_field_value)
-              .where("#{id_column} #{filter_operator} ?", decoded_cursor.id)
-          )
+        # Multiple fields filtering
+        cursor_values = decoded_cursor
+        build_multi_field_where_clause(sorted_relation, cursor_values)
+      end
+    end
+
+    # Build a WHERE clause for multiple fields with lexicographic ordering
+    #
+    # @param relation [ActiveRecord::Relation]
+    # @param cursor_values [Array] The decoded cursor values
+    # @return [ActiveRecord::Relation]
+    def build_multi_field_where_clause(relation, cursor_values)
+      conditions = []
+      
+      # Build conditions for each field level
+      (0...@order_specs.size).each do |field_index|
+        field_spec = @order_specs[field_index]
+        field_name = field_spec[:column]
+        cursor_value = cursor_values[field_index]
+        operator = filter_operator_for_field(field_spec)
+        
+        # Build the condition for this field level
+        field_conditions = []
+        
+        # Add conditions for all previous fields being equal
+        (0...field_index).each do |prev_index|
+          prev_field = @order_specs[prev_index][:column]
+          prev_value = cursor_values[prev_index]
+          field_conditions << "#{prev_field} = ?"
+        end
+        
+        # Add the condition for current field
+        field_conditions << "#{field_name} #{operator} ?"
+        
+        # Combine with AND
+        condition = field_conditions.join(' AND ')
+        conditions << condition
+      end
+      
+      # Add ID condition for the final field
+      if cursor_values.size > @order_specs.size
+        id_value = cursor_values.last
+        id_operator = filter_operator_for_field(@order_specs.last)
+        
+        # Build condition with all fields equal and ID different
+        id_conditions = []
+        @order_specs.each_with_index do |spec, index|
+          id_conditions << "#{spec[:column]} = ?"
+        end
+        id_conditions << "#{id_column} #{id_operator} ?"
+        
+        conditions << id_conditions.join(' AND ')
+      end
+      
+      # Combine all conditions with OR
+      if conditions.size == 1
+        relation.where(conditions.first, *cursor_values, id_value)
+      else
+        or_conditions = conditions.map { |cond| "(#{cond})" }.join(' OR ')
+        all_values = []
+        conditions.each_with_index do |_, index|
+          all_values.concat(cursor_values[0..index])
+        end
+        all_values << id_value if cursor_values.size > @order_specs.size
+        
+        relation.where(or_conditions, *all_values)
       end
     end
 
