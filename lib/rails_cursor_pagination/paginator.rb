@@ -386,9 +386,18 @@ module RailsCursorPagination
     # @return [String]
     def cursor_for_record(record)
       if use_offset_pagination?
-        # For offset pagination, encode the record's position in the result set
-        position = records.index(record) || 0
-        Base64.strict_encode64(position.to_json)
+        if @cursor.present?
+          # When we have a cursor, we're getting records AFTER that position
+          # So the absolute position = cursor_position + 1 + position_in_page
+          cursor_position = decoded_cursor
+          position_in_page = records.index(record) || 0
+          absolute_position = cursor_position + 1 + position_in_page
+        else
+          # First page: position is just the index in the current page
+          position_in_page = records.index(record) || 0
+          absolute_position = position_in_page
+        end
+        Base64.strict_encode64(absolute_position.to_json)
       else
         cursor_class.from_record(record: record, order_field: @order_field).encode
       end
@@ -532,16 +541,20 @@ module RailsCursorPagination
     # @return [Array<ActiveRecord>]
     def offset_pagination_records
       memoize :offset_pagination_records do
-        offset = @cursor.present? ? decoded_cursor : 0
-        
-        if paginate_forward?
-          # Forward pagination: get records after the offset
-          @relation.offset(offset).limit(@page_size).load
+        if @cursor.present?
+          offset = decoded_cursor
+          
+          if paginate_forward?
+            # Forward pagination: get records after the cursor position
+            @relation.offset(offset + 1).limit(@page_size).load
+          else
+            # Backward pagination: get records before the cursor position
+            start_offset = [0, offset - @page_size].max
+            @relation.offset(start_offset).limit(@page_size).load.reverse
+          end
         else
-          # Backward pagination: get records before the offset
-          # We need to calculate the start position for backward pagination
-          start_offset = [0, offset - @page_size].max
-          @relation.offset(start_offset).limit(@page_size).load.reverse
+          # First page: start from the beginning
+          @relation.offset(0).limit(@page_size).load
         end
       end
     end
@@ -560,14 +573,19 @@ module RailsCursorPagination
     #
     # @return [TrueClass, FalseClass]
     def offset_pagination_next_page?
-      offset = @cursor.present? ? decoded_cursor : 0
-      
-      if paginate_forward?
-        # Forward pagination: check if there are more records after current offset + page_size
-        @relation.offset(offset + @page_size).limit(1).exists?
+      if @cursor.present?
+        offset = decoded_cursor
+        
+        if paginate_forward?
+          # Forward pagination: check if there are more records after current offset + page_size
+          @relation.offset(offset + @page_size + 1).limit(1).exists?
+        else
+          # Backward pagination: check if there are records before the current offset
+          offset > @page_size
+        end
       else
-        # Backward pagination: check if there are records before the current offset
-        offset > @page_size
+        # First page: check if there are more records after the first page
+        @relation.offset(@page_size).limit(1).exists?
       end
     end
   end
